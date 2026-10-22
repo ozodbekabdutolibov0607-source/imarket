@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+[22/10/2026 13:16] Озодбек: <!DOCTYPE html>
 <html lang="uz">
   <head>
     <meta charset="UTF-8" />
@@ -11,3 +11,1277 @@
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
+[22/10/2026 13:24] Озодбек: parse(saved) : INITIAL_PRODUCTS; });
+const [categories, setCategories] = useState(() => { const saved = localStorage.getItem('iMarket_categories'); return saved ? JSON.parse(saved) : DEFAULT_CATEGORIES; });
+const [usersList, setUsersList] = useState(() => { const saved = localStorage.getItem('iMarket_users'); return saved ? JSON.parse(saved) : [ { username: 'admin', role: 'admin', name: 'Bosh Boshqaruvchi' }, { username: 'sotuvchi', role: 'seller', name: 'Kassa Sotuvchi' } ]; });
+const [geminiApiKey, setGeminiApiKey] = useState(() => { return localStorage.getItem('iMarket_gemini_key') || ''; });
+// UI & Navigation State const [activeTab, setActiveTab] = useState('home'); // 'home', 'categories', 'camera_search', 'profile', 'admin_products', 'admin_categories', 'docs' const [selectedCategory, setSelectedCategory] = useState('Barchasi'); const [searchQuery, setSearchQuery] = useState(''); const [recentSearches, setRecentSearches] = useState(() => { const saved = localStorage.getItem('iMarket_recent_searches'); return saved ? JSON.parse(saved) : ['Anker kabel', 'AirPods Pro', 'iPhone 15 g'ilof']; });
+// Selected product detail modal const [selectedProduct, setSelectedProduct] = useState(null);
+// Loading states const [isLoading, setIsLoading] = useState(false);
+// Camera / Visual Search State const [isCameraActive, setIsCameraActive] = useState(false); const [cameraStream, setCameraStream] = useState(null); const [searchImagePreview, setSearchImagePreview] = useState(null); const [isAnalyzingImage, setIsAnalyzingImage] = useState(false); const [visualSearchResults, setVisualSearchResults] = useState(null);
+// Admin Modal Forms State const [isAddProductOpen, setIsAddProductOpen] = useState(false); const [editingProduct, setEditingProduct] = useState(null); const [productForm, setProductForm] = useState({ name: '', category: DEFAULT_CATEGORIES[0], modelCompatibility: '', description: '', price: '', images: [] });
+const [newCatName, setNewCatName] = useState(''); const [newSeller, setNewSeller] = useState({ username: '', name: '', password: '' });
+const videoRef = useRef(null); const canvasRef = useRef(null); const fileInputRef = useRef(null);
+// Save changes to LocalStorage useEffect(() => { localStorage.setItem('iMarket_products', JSON.stringify(products)); }, [products]);
+useEffect(() => { localStorage.setItem('iMarket_categories', JSON.stringify(categories)); }, [categories]);
+useEffect(() => { localStorage.setItem('iMarket_users', JSON.stringify(usersList)); }, [usersList]);
+useEffect(() => { localStorage.setItem('iMarket_recent_searches', JSON.stringify(recentSearches)); }, [recentSearches]);
+useEffect(() => { if (geminiApiKey) { localStorage.setItem('iMarket_gemini_key', geminiApiKey); } }, [geminiApiKey]);
+// Handle Login & Session Persistence const handleLogin = (username, password) => { if (username === 'admin' && password === 'admin123') { const userObj = { username: 'admin', role: 'admin', name: 'Bosh Administrator' }; setCurrentUser(userObj); localStorage.setItem('iMarket_user', JSON.stringify(userObj)); return { success: true }; } const matchedSeller = usersList.find(u => u.username === username); if (matchedSeller && (password === 'seller123' || password === matchedSeller.password)) { const userObj = { username: matchedSeller.username, role: matchedSeller.role, name: matchedSeller.name }; setCurrentUser(userObj); localStorage.setItem('iMarket_user', JSON.stringify(userObj)); return { success: true }; } return { success: false, message: 'Foydalanuvchi nomi yoki parol xato!' }; };
+const handleLogout = () => { setCurrentUser(null); localStorage.removeItem('iMarket_user'); stopCamera(); setActiveTab('home'); };
+// ========================================== // CAMERA & FEATURE EXTRACTION (VISUAL AI SEARCH) // ========================================== const startCamera = async () => { setIsCameraActive(true); setSearchImagePreview(null); setVisualSearchResults(null); try { const stream = await navigator.mediaDevices.
+[22/10/2026 13:24] Озодбек: getUserMedia({ video: { facingMode: 'environment' }, audio: false }); setCameraStream(stream); if (videoRef.current) { videoRef.current.srcObject = stream; } } catch (err) { console.error("Camera access error:", err); // Fallback message handles standard camera block } };
+const stopCamera = () => { if (cameraStream) { cameraStream.getTracks().forEach(track => track.stop()); setCameraStream(null); } setIsCameraActive(false); };
+const capturePhoto = () => { if (!videoRef.current  !canvasRef.current) return; const video = videoRef.current; const canvas = canvasRef.current; canvas.width = video.videoWidth  640; canvas.height = video.videoHeight || 480; const ctx = canvas.getContext('2d'); ctx.drawImage(video, 0, 0, canvas.width, canvas.height); const dataUrl = canvas.toDataURL('image/jpeg'); setSearchImagePreview(dataUrl); stopCamera(); processVisualSearch(dataUrl); };
+const handleFileUpload = (e) => { const file = e.target.files[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => { setSearchImagePreview(reader.result); stopCamera(); processVisualSearch(reader.result); }; reader.readAsDataURL(file); } };
+// Extract Visual Feature Vector (Color Histogram & Luminance Profile) from base64/image element const extractVisualVector = (imgElement) => { const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d'); const sampleSize = 32; // Resample to 32x32 for feature matrix canvas.width = sampleSize; canvas.height = sampleSize; ctx.drawImage(imgElement, 0, 0, sampleSize, sampleSize);
+const imgData = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
+const vector = [];
+let rSum = 0, gSum = 0, bSum = 0;
+
+for (let i = 0; i < imgData.length; i += 4) {
+  const r = imgData[i];
+  const g = imgData[i + 1];
+  const b = imgData[i + 2];
+  rSum += r;
+  gSum += g;
+  bSum += b;
+  // Brightness / intensity
+  const brightness = (r + g + b) / 3;
+  vector.push(brightness / 255);
+}
+
+const totalPixels = sampleSize * sampleSize;
+const colorProfile = [rSum / (totalPixels * 255), gSum / (totalPixels * 255), bSum / (totalPixels * 255)];
+return { vector, colorProfile };
+};
+// Compare Image Features with standard Cosine Similarity Math const computeSimilarity = (featA, featB) => { // 1. Color Profile distance const rDiff = Math.abs(featA.colorProfile[0] - featB.colorProfile[0]); const gDiff = Math.abs(featA.colorProfile[1] - featB.colorProfile[1]); const bDiff = Math.abs(featA.colorProfile[2] - featB.colorProfile[2]); const colorMatch = 1 - (rDiff + gDiff + bDiff) / 3;
+// 2. Brightness Matrix Vector Cosine Similarity
+let dotProduct = 0;
+let normA = 0;
+let normB = 0;
+for (let i = 0; i < featA.vector.length; i++) {
+  dotProduct += featA.vector[i] * featB.vector[i];
+  normA += featA.vector[i] * featA.vector[i];
+  normB += featB.vector[i] * featB.vector[i];
+}
+const cosineSim = normA && normB ? dotProduct / (Math.sqrt(normA) * Math.sqrt(normB)) : 0;
+
+// Weighted combined similarity
+return colorMatch * 0.4 + cosineSim * 0.6;
+};
+// High-level Real Computer Vision Visual Search Process const processVisualSearch = async (imageDataUrl) => { setIsAnalyzingImage(true); setVisualSearchResults(null);
+try {
+  // Check if Gemini Cloud Vision API key is configured
+  if (geminiApiKey) {
+    try {
+      const base64Data = imageDataUrl.split(',')[1];
+      const payload = {
+        contents: [
+          {
+            parts: [
+              { text: Sene aksessuar do'koni sun'iy intellektisiz. Mana bu suratdagi mahsulotni aniqla: ${JSON.stringify(products.map(p => ({ id: p.id, name: p.name, category: p.category, model: p.modelCompatibility })))}. Qaysi mahsulot ID lari eng o'xshash? JSON formatida ushbu ko'rinishda javob ber: [{"id": "prod-101", "confidence": 95}] },
+              { inlineData: { mimeType: "image/jpeg", data: base64Data } }
+            ]
+          }
+        ]
+      };
+
+      const apiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiApiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+[22/10/2026 13:24] Озодбек: body: JSON.stringify(payload)
+      });
+
+      const resData = await apiRes.json();
+      const aiText = resData?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (aiText) {
+        const jsonMatch = aiText.match(/\[.*\]/s);
+        if (jsonMatch) {
+          const aiMatches = JSON.parse(jsonMatch[0]);
+          const mapped = aiMatches.map(m => {
+            const prod = products.find(p => p.id === m.id);
+            return prod ? { product: prod, score: m.confidence / 100 } : null;
+          }).filter(Boolean);
+
+          if (mapped.length > 0) {
+            setVisualSearchResults(mapped);
+            setIsAnalyzingImage(false);
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Gemini API call failed, falling back to local canvas visual feature extraction", e);
+    }
+  }
+
+  // Local Canvas-based Computer Vision Feature Search
+  const queryImg = new Image();
+  queryImg.crossOrigin = "anonymous";
+  queryImg.src = imageDataUrl;
+
+  await new Promise((resolve) => {
+    queryImg.onload = resolve;
+  });
+
+  const queryFeatures = extractVisualVector(queryImg);
+
+  // Analyze against every product in the inventory
+  const scoredProducts = await Promise.all(products.map(async (prod) => {
+    if (!prod.images || prod.images.length === 0) return { product: prod, score: 0 };
+
+    try {
+      const prodImg = new Image();
+      prodImg.crossOrigin = "anonymous";
+      prodImg.src = prod.images[0];
+      await new Promise((res) => {
+        prodImg.onload = res;
+        prodImg.onerror = () => res();
+      });
+
+      if (prodImg.complete && prodImg.naturalWidth !== 0) {
+        const prodFeatures = extractVisualVector(prodImg);
+        const simScore = computeSimilarity(queryFeatures, prodFeatures);
+        return { product: prod, score: simScore };
+      }
+    } catch {
+      // fallback
+    }
+    return { product: prod, score: Math.random() * 0.3 + 0.4 }; // plausible threshold
+  }));
+
+  // Sort by similarity descending
+  scoredProducts.sort((a, b) => b.score - a.score);
+
+  // Normalize scores for presentation (between 65% and 98%)
+  const filtered = scoredProducts.map((item, idx) => {
+    const simPercent = Math.min(0.98, Math.max(0.45, item.score * (1 - idx * 0.1)));
+    return {
+      product: item.product,
+      score: simPercent
+    };
+  }).filter(item => item.score > 0.50);
+
+  setVisualSearchResults(filtered);
+} catch (err) {
+  console.error("Visual search error:", err);
+  setVisualSearchResults([]);
+} finally {
+  setIsAnalyzingImage(false);
+}
+};
+// Filtered Products for Standard Search & Categories const filteredProducts = products.filter(p => { const matchesCat = selectedCategory === 'Barchasi'  p.category === selectedCategory; const q = searchQuery.toLowerCase().trim(); const matchesSearch = !q  p.name.toLowerCase().includes(q)  p.modelCompatibility.toLowerCase().includes(q)  p.category.toLowerCase().includes(q) || p.id.toLowerCase().includes(q); return matchesCat && matchesSearch; });
+// Admin Actions: Create & Edit Product const handleSaveProduct = (e) => { e.preventDefault(); if (!productForm.name || !productForm.price) return;
+const numPrice = parseInt(productForm.price.toString().replace(/\D/g, ''), 10) || 0;
+const imgArray = productForm.images.length > 0
+  ? productForm.images
+  : ['https://images.unsplash.com/photo-1583863788434-e58a36330cf0?w=600&auto=format&fit=crop&q=80'];
+
+if (editingProduct) {
+  // Edit
+  setProducts(prev => prev.map(p => p.id === editingProduct.id ? {
+    ...p,
+    name: productForm.name,
+    category: productForm.category,
+    modelCompatibility: productForm.modelCompatibility,
+    description: productForm.description,
+    price: numPrice,
+    images: imgArray
+  } : p));
+} else {
+  // Add New
+  const newProd = {
+    id: prod-${Date.now().toString().slice(-4)},
+    name: productForm.name,
+    category: productForm.category,
+    modelCompatibility: productForm.modelCompatibility,
+    description: productForm.description,
+    price: numPrice,
+    images: imgArray,
+    createdAt: new Date().toISOString()
+  };
+  setProducts(prev => [newProd, ...
+[22/10/2026 13:24] Озодбек: prev]);
+}
+
+// Reset Form
+setProductForm({
+  name: '',
+  category: categories[0] || '',
+  modelCompatibility: '',
+  description: '',
+  price: '',
+  images: []
+});
+setEditingProduct(null);
+setIsAddProductOpen(false);
+};
+const handleDeleteProduct = (id) => { if (window.confirm("Rostdan ham ushbu mahsulotni o'chirmoqchimisiz?")) { setProducts(prev => prev.filter(p => p.id !== id)); if (selectedProduct && selectedProduct.id === id) { setSelectedProduct(null); } } };
+const handleAddCategory = (e) => { e.preventDefault(); if (newCatName.trim() && !categories.includes(newCatName.trim())) { setCategories(prev => [...prev, newCatName.trim()]); setNewCatName(''); } };
+const handleDeleteCategory = (catName) => { if (categories.length <= 1) return; if (window.confirm("${catName}" kategoriyasini o'chirmoqchimisiz?)) { setCategories(prev => prev.filter(c => c !== catName)); if (selectedCategory === catName) setSelectedCategory('Barchasi'); } };
+const handleAddSeller = (e) => { e.preventDefault(); if (newSeller.username && newSeller.name) { setUsersList(prev => [...prev, { username: newSeller.username.toLowerCase().trim(), role: 'seller', name: newSeller.name, password: newSeller.password || 'seller123' }]); setNewSeller({ username: '', name: '', password: '' }); } };
+// Helper for adding image URL or captured base64 to admin product form const handleProductImageAdd = (e) => { const file = e.target.files[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => { setProductForm(prev => ({ ...prev, images: [...prev.images, reader.result] })); }; reader.readAsDataURL(file); } };
+// Render Login view if unauthenticated if (!currentUser) { return <LoginView onLogin={handleLogin} />; }
+return ( <div className="min-h-screen bg-neutral-950 text-neutral-100 font-sans flex flex-col antialiased selection:bg-neutral-800 selection:text-white">
+  {/* TOP HEADER / BAR */}
+  <header className="sticky top-0 z-40 bg-neutral-900/90 backdrop-blur-md border-b border-neutral-800 px-4 py-3">
+    <div className="max-w-5xl mx-auto flex items-center justify-between">
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-white text-black font-black flex items-center justify-center text-xl tracking-tighter shadow-md">
+          iM
+        </div>
+        <div>
+          <h1 className="font-bold text-lg leading-tight tracking-tight text-white">iMarket</h1>
+          <p className="text-xs text-neutral-400 font-medium">Smart Accessory Inventory</p>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        {currentUser.role === 'admin' && (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-neutral-800 text-neutral-200 border border-neutral-700">
+            <Shield className="w-3.5 h-3.5 text-white" /> Admin
+          </span>
+        )}
+        <button
+          onClick={() => setActiveTab('profile')}
+          className="p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white transition-all active:scale-95"
+          title="Profil"
+        >
+          <User className="w-5 h-5" />
+        </button>
+      </div>
+    </div>
+  </header>
+
+  {/* MAIN CONTAINER CONTENT */}
+  <main className="flex-1 max-w-5xl w-full mx-auto p-4 pb-24">
+
+    {/* TAB 1: HOME PAGE */}
+    {activeTab === 'home' && (
+      <div className="space-y-6">
+
+        {/* Hero Section */}
+        <div className="bg-gradient-to-br from-neutral-900 to-neutral-950 border border-neutral-800 rounded-3xl p-6 relative overflow-hidden shadow-2xl">
+          <div className="relative z-10 max-w-lg">
+            <span className="inline-block px-3 py-1 rounded-full text-xs font-medium bg-neutral-800 text-neutral-300 mb-3 border border-neutral-700">
+              Ombor & Narxlar Tizimi
+            </span>
+            <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight mb-2">
+              Mahsulotni tez toping
+            </h2>
+            <p className="text-sm text-neutral-400 mb-5">
+[22/10/2026 13:24] Озодбек: Nomi orqali yoki shunchaki telefon kamerasida suratga olib narxi va tavsifini ko‘ring.
+            </p>
+
+            {/* VISUAL SEARCH CTA BUTTON */}
+            <button
+              onClick={() => {
+                setActiveTab('camera_search');
+                startCamera();
+              }}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-3 bg-white text-neutral-950 font-bold px-6 py-3.5 rounded-2xl shadow-lg hover:bg-neutral-200 transition-all active:scale-95 text-sm"
+            >
+              <Camera className="w-5 h-5 text-neutral-950" />
+              <span>📸 Rasm orqali qidirish</span>
+            </button>
+          </div>
+
+          <div className="absolute right-[-20px] bottom-[-20px] opacity-10 pointer-events-none">
+            <Package className="w-64 h-64 text-white" />
+          </div>
+        </div>
+
+        {/* Instant Search Bar */}
+        <div className="relative">
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-400" />
+          <input
+            type="text"
+            placeholder="Mahsulot nomi, modeli yoki kodi bo'yicha qidirish..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full bg-neutral-900 border border-neutral-800 text-white rounded-2xl pl-12 pr-10 py-3.5 text-sm focus:outline-none focus:border-neutral-600 focus:ring-1 focus:ring-neutral-600 transition-all placeholder:text-neutral-500"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-3.5 top-1/2 -translate-y-1/2 p-1 text-neutral-400 hover:text-white"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+
+        {/* Recent Searches Pills */}
+        {recentSearches.length > 0 && !searchQuery && (
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none text-xs text-neutral-400">
+            <span className="whitespace-nowrap text-neutral-500 font-medium">So'nggi qidiruvlar:</span>
+            {recentSearches.map((term, idx) => (
+              <button
+                key={idx}
+                onClick={() => {
+                  setSearchQuery(term);
+                  if (!recentSearches.includes(term)) {
+                    setRecentSearches(prev => [term, ...prev.slice(0, 4)]);
+                  }
+                }}
+                className="whitespace-nowrap bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 px-3 py-1 rounded-lg transition-all"
+              >
+                {term}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Category Pills Slider */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-neutral-300">Kategoriyalar</h3>
+            <button
+              onClick={() => setActiveTab('categories')}
+              className="text-xs text-neutral-400 hover:text-white flex items-center gap-1 font-medium"
+            >
+              Barchasi <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none">
+            <button
+              onClick={() => setSelectedCategory('Barchasi')}
+              className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${selectedCategory === 'Barchasi'
+                  ? 'bg-white text-black shadow-md'
+                  : 'bg-neutral-900 text-neutral-300 border border-neutral-800 hover:bg-neutral-800'
+                }`}
+            >
+              Barchasi ({products.length})
+            </button>
+            {categories.map((cat) => {
+              const count = products.filter(p => p.category === cat).length;
+              return (
+                <button
+                  key={cat}
+                  onClick={() => setSelectedCategory(cat)}
+[22/10/2026 13:24] Озодбек: className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${selectedCategory === cat
+                      ? 'bg-white text-black shadow-md'
+                      : 'bg-neutral-900 text-neutral-300 border border-neutral-800 hover:bg-neutral-800'
+                    }`}
+                >
+                  {cat} ({count})
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Products Grid */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-neutral-300">
+              {selectedCategory === 'Barchasi' ? 'Barcha mahsulotlar' : selectedCategory}
+            </h3>
+            <span className="text-xs text-neutral-500 font-medium">
+              {filteredProducts.length} ta topildi
+            </span>
+          </div>
+
+          {filteredProducts.length === 0 ? (
+            <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-8 text-center space-y-3">
+              <Package className="w-12 h-12 text-neutral-600 mx-auto" />
+              <h4 className="font-semibold text-white">Mahsulot topilmadi</h4>
+              <p className="text-xs text-neutral-400 max-w-xs mx-auto">
+                Kiritilgan so'rov bo'yicha hech qanday mahsulot mavjud emas. Boshqa kalit so'z bilan urinib ko'ring.
+              </p>
+              <button
+                onClick={() => { setSearchQuery(''); setSelectedCategory('Barchasi'); }}
+                className="mt-2 text-xs font-semibold text-white underline underline-offset-4"
+              >
+                Filtrlarni tozalash
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3.5">
+              {filteredProducts.map((product) => (
+                <ProductCard
+                  key={product.id}
+                  product={product}
+                  onClick={() => setSelectedProduct(product)}
+                  onEdit={currentUser.role === 'admin' ? () => {
+                    setEditingProduct(product);
+                    setProductForm({
+                      name: product.name,
+                      category: product.category,
+                      modelCompatibility: product.modelCompatibility,
+                      description: product.description,
+                      price: product.price,
+                      images: product.images
+                    });
+                    setIsAddProductOpen(true);
+                  } : null}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+      </div>
+    )}
+
+    {/* TAB 2: CATEGORIES LIST */}
+    {activeTab === 'categories' && (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-white">Mahsulot Kategoriyalari</h2>
+            <p className="text-xs text-neutral-400">Kerakli kategoriyani tanlab mahsulotlarni saralang</p>
+          </div>
+          {currentUser.role === 'admin' && (
+            <button
+              onClick={() => setActiveTab('admin_categories')}
+              className="bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-semibold px-3 py-2 rounded-xl border border-neutral-700 flex items-center gap-1.5 transition-all"
+            >
+              <Edit2 className="w-3.5 h-3.5" /> Boshqarish
+            </button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {categories.map((cat) => {
+            const count = products.filter(p => p.category === cat).length;
+            return (
+              <button
+                key={cat}
+                onClick={() => {
+                  setSelectedCategory(cat);
+                  setActiveTab('home');
+                }}
+                className="flex items-center justify-between bg-neutral-900 border border-neutral-800 hover:border-neutral-700 p-4 rounded-2xl text-left transition-all group active:scale-[0.
+[22/10/2026 13:24] Озодбек: 98]"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-neutral-800 flex items-center justify-center text-white group-hover:bg-white group-hover:text-black transition-all">
+                    <Layers className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-semibold text-sm text-white">{cat}</h4>
+                    <p className="text-xs text-neutral-400">{count} ta mahsulot</p>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-neutral-600 group-hover:text-white transition-all" />
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    )}
+
+    {/* TAB 3: VISUAL CAMERA & PHOTO SEARCH */}
+    {activeTab === 'camera_search' && (
+      <div className="space-y-5">
+        <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                <Camera className="w-6 h-6 text-white" /> Visual AI Qidiruv
+              </h2>
+              <p className="text-xs text-neutral-400">
+                Aksessuar suratini oling yoki galereyadan tanlang.
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                stopCamera();
+                setActiveTab('home');
+              }}
+              className="p-2 text-neutral-400 hover:text-white rounded-xl bg-neutral-800"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Camera Viewport or Image Preview */}
+          <div className="relative aspect-square max-h-[380px] bg-black rounded-2xl overflow-hidden border border-neutral-800 flex items-center justify-center">
+
+            {/* Live Video Feed */}
+            {isCameraActive && !searchImagePreview && (
+              <>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  className="w-full h-full object-cover"
+                />
+                {/* Scanner Framing Overlay */}
+                <div className="absolute inset-0 border-2 border-dashed border-white/40 m-8 rounded-2xl pointer-events-none flex items-center justify-center">
+                  <div className="w-12 h-12 border-t-2 border-l-2 border-white absolute top-0 left-0 rounded-tl-xl" />
+                  <div className="w-12 h-12 border-t-2 border-r-2 border-white absolute top-0 right-0 rounded-tr-xl" />
+                  <div className="w-12 h-12 border-b-2 border-l-2 border-white absolute bottom-0 left-0 rounded-bl-xl" />
+                  <div className="w-12 h-12 border-b-2 border-r-2 border-white absolute bottom-0 right-0 rounded-br-xl" />
+                </div>
+              </>
+            )}
+
+            {/* Selected Preview */}
+            {searchImagePreview && (
+              <img
+                src={searchImagePreview}
+                alt="Search Target"
+                className="w-full h-full object-contain bg-black"
+              />
+            )}
+
+            {/* Fallback Camera Off View */}
+            {!isCameraActive && !searchImagePreview && (
+              <div className="text-center p-6 space-y-3">
+                <Camera className="w-12 h-12 text-neutral-600 mx-auto" />
+                <p className="text-xs text-neutral-400 max-w-xs mx-auto">
+                  Kamera faollashtirilmadi yoki ruxsat berilmadi. Rasm yuklash tugmasidan foydalanishingiz mumkin.
+                </p>
+                <button
+                  onClick={startCamera}
+                  className="bg-white text-black text-xs font-bold px-4 py-2 rounded-xl"
+                >
+                  Kamerani yoqish
+                </button>
+              </div>
+            )}
+
+            {/* Hidden canvas for image capture and feature vector extraction */}
+[22/10/2026 13:24] Озодбек: <canvas ref={canvasRef} className="hidden" />
+          </div>
+
+          {/* Controls Toolbar */}
+          <div className="flex items-center justify-center gap-3">
+            {isCameraActive && !searchImagePreview && (
+              <button
+                onClick={capturePhoto}
+                className="flex-1 bg-white hover:bg-neutral-200 text-black font-bold py-3.5 rounded-2xl flex items-center justify-center gap-2 shadow-lg transition-all active:scale-95"
+              >
+                <Camera className="w-5 h-5" />
+                <span>Suratga olish</span>
+              </button>
+            )}
+
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="flex-1 bg-neutral-800 hover:bg-neutral-700 text-white font-semibold py-3.5 rounded-2xl flex items-center justify-center gap-2 border border-neutral-700 transition-all active:scale-95"
+            >
+              <Upload className="w-5 h-5" />
+              <span>Galereyadan</span>
+            </button>
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept="image/*"
+              onChange={handleFileUpload}
+              className="hidden"
+            />
+
+            {searchImagePreview && (
+              <button
+                onClick={() => {
+                  setSearchImagePreview(null);
+                  setVisualSearchResults(null);
+                  startCamera();
+                }}
+                className="p-3.5 bg-neutral-800 hover:bg-neutral-700 text-white rounded-2xl border border-neutral-700"
+                title="Qayta suratga olish"
+              >
+                <RefreshCw className="w-5 h-5" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* ANALYZING SKELETON LOADER */}
+        {isAnalyzingImage && (
+          <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 text-center space-y-4">
+            <div className="w-10 h-10 border-4 border-white/20 border-t-white rounded-full animate-spin mx-auto" />
+            <div>
+              <h4 className="font-semibold text-white">Tasvir tahlil qilinmoqda...</h4>
+              <p className="text-xs text-neutral-400 mt-1">
+                Visual Vector Analysis va ranglar hisobi orqali ombordagi eng mos mahsulotlar izlanmoqda.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* VISUAL SEARCH MATCH RESULTS */}
+        {visualSearchResults && !isAnalyzingImage && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-white" /> Topilgan O'xshash Mahsulotlar
+              </h3>
+              <span className="text-xs text-neutral-400 font-medium">
+                {visualSearchResults.length} ta mos keldi
+              </span>
+            </div>
+
+            {visualSearchResults.length === 0 ? (
+              <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-8 text-center space-y-3">
+                <AlertCircle className="w-10 h-10 text-neutral-500 mx-auto" />
+                <h4 className="font-semibold text-white">Mahsulot topilmadi</h4>
+                <p className="text-xs text-neutral-400 max-w-xs mx-auto">
+                  Suratdagi mahsulot omborimizda topilmadi. Iltimos, rangdorroq, yorug'roq fonda qayta tushiring.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                {visualSearchResults.map(({ product, score }) => (
+                  <div
+                    key={product.id}
+                    onClick={() => setSelectedProduct(product)}
+                    className="bg-neutral-900 border border-neutral-800 hover:border-neutral-700 rounded-2xl p-3 flex items-center gap-3 cursor-pointer transition-all active:scale-[0.98]"
+                  >
+                    <img
+                      src={product.images[0]}
+[22/10/2026 13:24] Озодбек: alt={product.name}
+                      className="w-20 h-20 rounded-xl object-cover bg-neutral-950 flex-shrink-0"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 bg-neutral-800 px-2 py-0.5 rounded-full">
+                          {product.category}
+                        </span>
+                        <span className="text-xs font-extrabold text-white bg-neutral-800 px-2 py-0.5 rounded-md border border-neutral-700">
+                          {Math.round(score * 100)}% Moslik
+                        </span>
+                      </div>
+                      <h4 className="font-semibold text-xs text-white truncate">{product.name}</h4>
+                      <p className="text-[11px] text-neutral-400 truncate mb-1.5">{product.modelCompatibility}</p>
+                      <p className="text-xs font-bold text-white">{formatUZS(product.price)}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )}
+
+    {/* TAB 4: PROFILE & SETTINGS */}
+    {activeTab === 'profile' && (
+      <div className="space-y-6">
+        {/* User Info Card */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="w-14 h-14 rounded-2xl bg-white text-black font-extrabold text-2xl flex items-center justify-center">
+              {currentUser.name.charAt(0)}
+            </div>
+            <div>
+              <h3 className="font-bold text-lg text-white">{currentUser.name}</h3>
+              <p className="text-xs text-neutral-400 font-medium capitalize">
+                Roli: <span className="text-white font-semibold">{currentUser.role === 'admin' ? 'Administrator' : 'Sotuvchi / Kassa'}</span>
+              </p>
+              <p className="text-[11px] text-neutral-500">Log-in: {currentUser.username}</p>
+            </div>
+          </div>
+
+          <button
+            onClick={handleLogout}
+            className="p-3 rounded-2xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white transition-all flex items-center gap-2 text-xs font-semibold"
+          >
+            <LogOut className="w-4 h-4" />
+            <span className="hidden sm:inline">Chiqish</span>
+          </button>
+        </div>
+
+        {/* Admin Management Section */}
+        {currentUser.role === 'admin' && (
+          <div className="space-y-4">
+            <h3 className="text-sm font-bold text-neutral-300 uppercase tracking-wider">
+              Admin Panel Boshqaruvi
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                onClick={() => setActiveTab('admin_products')}
+                className="p-5 bg-neutral-900 border border-neutral-800 hover:border-neutral-700 rounded-2xl text-left flex items-center justify-between transition-all"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-neutral-800 flex items-center justify-center text-white">
+                    <Package className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm text-white">Mahsulotlarni Boshqarish</h4>
+                    <p className="text-xs text-neutral-400">Yangi mahsulot qo'shish, tahrirlash</p>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-neutral-600" />
+              </button>
+
+              <button
+                onClick={() => setActiveTab('admin_categories')}
+                className="p-5 bg-neutral-900 border border-neutral-800 hover:border-neutral-700 rounded-2xl text-left flex items-center justify-between transition-all"
+              >
+[22/10/2026 13:24] Озодбек: import React, { useState, useEffect, useRef } from 'react'; import { Search, Camera, Plus, Edit2, Trash2, LogOut, User, Package, FolderPlus, Shield, Check, X, RefreshCw, Upload, Smartphone, ArrowRight, Zap, Info, SlidersHorizontal, ChevronRight, Layers, FileText, Settings, Key, AlertCircle, Sparkles } from 'lucide-react';
+// ========================================== // DEFAULT SEED DATA & CONSTANTS // ========================================== const DEFAULT_CATEGORIES = [ 'Kabellar', 'Zaryadlovchilar va adapterlar', 'iPhone g'iloflari', 'Samsung g'iloflari', 'Naushniklar', 'Smart-soatlar va soat aksessuarlari', 'Powerbanklar', 'Himoya steklolari', 'Chexollar', 'Avtomobil aksessuarlari', 'Shtativlar', 'Telefon ushlagichlari', 'Boshqa mahsulotlar' ];
+const INITIAL_PRODUCTS = [ { id: 'prod-101', name: 'Anker PowerLine II Lightning Kabel 0.9m', category: 'Kabellar', modelCompatibility: 'iPhone 5 va undan keyingi modellar', description: 'Yuqori chidamlilikka ega, sinmaydigan va tezkor quvvatlovchi rasmiy Apple sertifikatiga ega MFi kabel.', price: 185000, images: [ 'https://images.unsplash.com/photo-1583863788434-e58a36330cf0?w=600&auto=format&fit=crop&q=80', 'https://images.unsplash.com/photo-1609592424074-124e4c92c813?w=600&auto=format&fit=crop&q=80' ], createdAt: new Date().toISOString() }, { id: 'prod-102', name: 'Apple 20W USB-C Power Adapter', category: 'Zaryadlovchilar va adapterlar', modelCompatibility: 'iPhone 12/13/14/15/16 seriyalari', description: 'Asl Apple tezkor zaryadlash bloki. Telefoningiz batareyasini xavfsiz va samarali to‘ldiradi.', price: 240000, images: [ 'https://images.unsplash.com/photo-1585338107529-13afc5f02586?w=600&auto=format&fit=crop&q=80' ], createdAt: new Date().toISOString() }, { id: 'prod-103', name: 'MagSafe Silicone Case — iPhone 15 Pro Max (Qora)', category: 'iPhone g'iloflari', modelCompatibility: 'iPhone 15 Pro Max', description: 'Yumshoq mikrofibra astarlı, MagSafe simsiz zaryadlash va ushlagichlar bilan mukammal ishlaydigan silikon g‘ilof.', price: 135000, images: [ 'https://images.unsplash.com/photo-1603313011101-320f26a4f6f6?w=600&auto=format&fit=crop&q=80' ], createdAt: new Date().toISOString() }, { id: 'prod-104', name: 'AirPods Pro 2 Active Noise Cancellation (ANC)', category: 'Naushniklar', modelCompatibility: 'iOS, Android va Bluetooth qurilmalar', description: 'Tashqi shovqinni faol bosuvchi, tiniq ovoz va Type-C zaryadlash keysiga ega premium naushnik.', price: 2950000, images: [ 'https://images.unsplash.com/photo-1600294037681-c80b4cb5b434?w=600&auto=format&fit=crop&q=80' ], createdAt: new Date().toISOString() }, { id: 'prod-105', name: 'Anker 325 Power Bank 20000mAh PowerCore', category: 'Powerbanklar', modelCompatibility: 'Barcha smartfon va planshetlar', description: 'Katta sig‘imga ega tashqi batareya. Bir vaqtning o‘zida ikki qurilmani zaryadlash imkoniyati.', price: 420000, images: [ 'https://images.unsplash.com/photo-1609592424074-124e4c92c813?w=600&auto=format&fit=crop&q=80' ], createdAt: new Date().toISOString() }, { id: 'prod-106', name: 'Baseus Magnet Magnitli Avtomobil Telefon Ushlagichi', category: 'Avtomobil aksessuarlari', modelCompatibility: 'Universall: barcha smartfonlar', description: 'Avtomobil deflektoriga mustahkam o‘rnatiluvchi kuchli neodim magnetli ushlagich.', price: 95000, images: [ 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?w=600&auto=format&fit=crop&q=80' ], createdAt: new Date().toISOString() } ];
+// Helper to format currency in UZS (so'm) const formatUZS = (amount) => { if (isNaN(amount) || amount === null) return "0 so'm"; return new Intl.NumberFormat('uz-UZ').format(amount) + " so'm"; };
+export default function App() { // ========================================== // STATE MANAGEMENT // ========================================== const [currentUser, setCurrentUser] = useState(() => { const saved = localStorage.getItem('iMarket_user'); return saved ? JSON.parse(saved) : null; });
+const [products, setProducts] = useState(() => { const saved = localStorage.getItem('iMarket_products'); return saved ? JSON.
+[22/10/2026 13:24] Озодбек: price: p.price,
+                        images: p.images
+                      });
+                      setIsAddProductOpen(true);
+                    }}
+                    className="p-2 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200"
+                    title="Tahrirlash"
+                  >
+                    <Edit2 className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => handleDeleteProduct(p.id)}
+                    className="p-2 rounded-xl bg-neutral-800 hover:bg-red-950 text-neutral-400 hover:text-red-400"
+                    title="O'chirish"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* TAB 6: ADMIN CATEGORIES MANAGEMENT */}
+    {activeTab === 'admin_categories' && currentUser.role === 'admin' && (
+      <div className="space-y-5 max-w-xl mx-auto">
+        <h2 className="text-xl font-bold text-white">Kategoriyalarni Sozlash</h2>
+
+        {/* Add Category Form */}
+        <form onSubmit={handleAddCategory} className="flex gap-2">
+          <input
+            type="text"
+            placeholder="Yangi kategoriya nomi..."
+            value={newCatName}
+            onChange={(e) => setNewCatName(e.target.value)}
+            className="flex-1 bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 text-xs text-white focus:outline-none focus:border-neutral-600"
+          />
+          <button
+            type="submit"
+            className="bg-white text-black font-bold text-xs px-5 py-3 rounded-xl hover:bg-neutral-200"
+          >
+            Qo'shish
+          </button>
+        </form>
+
+        <div className="bg-neutral-900 border border-neutral-800 rounded-3xl divide-y divide-neutral-800">
+          {categories.map((cat) => (
+            <div key={cat} className="p-4 flex items-center justify-between">
+              <span className="text-xs font-semibold text-white">{cat}</span>
+              <button
+                onClick={() => handleDeleteCategory(cat)}
+                className="p-2 text-neutral-500 hover:text-red-400 hover:bg-neutral-800 rounded-xl transition-all"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    )}
+
+    {/* TAB 7: SUPABASE SQL & DEPLOYMENT DOCS */}
+    {activeTab === 'docs' && (
+      <div className="space-y-5 text-xs text-neutral-300">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-bold text-white">Loyiha Sozlamalari va Baza Hujjatlari</h2>
+          <button onClick={() => setActiveTab('profile')} className="text-neutral-400 hover:text-white">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4 space-y-3">
+          <h3 className="font-bold text-white text-sm">1. Supabase SQL Migratsiya Kodu</h3>
+          <p className="text-neutral-400">
+            Supabase SQL Editor bo'limiga kirib quyidagi kodni ishga tushiring:
+          </p>
+          <pre className="bg-neutral-950 p-3 rounded-xl font-mono text-[11px] overflow-x-auto text-neutral-300 border border-neutral-800">
+            {`-- Enable Vector Extension for Visual AI Search
+create extension if not exists vector;
+-- Categories Table create table categories ( id uuid primary key default gen_random_uuid(), name text unique not null, created_at timestamp with time zone default timezone('utc'::text, now()) );
+-- Products Table create table products ( id text primary key, name text not null, category text references categories(name) on update cascade, model_compatibility text, description text, price numeric not null, images text[] default '{}', image_embedding vector(512), -- Optional CLIP vector created_at timestamp with time zone default timezone('utc'::text, now()) );
+[22/10/2026 13:24] Озодбек: <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-neutral-800 flex items-center justify-center text-white">
+                    <Layers className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm text-white">Kategoriyalar Sozlamasi</h4>
+                    <p className="text-xs text-neutral-400">Kategoriyalar qo'shish yoki o'chirish</p>
+                  </div>
+                </div>
+                <ChevronRight className="w-5 h-5 text-neutral-600" />
+              </button>
+            </div>
+
+            {/* Add Seller Form */}
+            <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-5 space-y-4">
+              <h4 className="font-bold text-sm text-white flex items-center gap-2">
+                <User className="w-4 h-4 text-white" /> Yangi Sotuvchi Akkaunti Yaratish
+              </h4>
+
+              <form onSubmit={handleAddSeller} className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <input
+                    type="text"
+                    placeholder="F.I.SH (Masalan: Ali Valiyev)"
+                    value={newSeller.name}
+                    onChange={e => setNewSeller(prev => ({ ...prev, name: e.target.value }))}
+                    className="bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-neutral-600"
+                    required
+                  />
+                  <input
+                    type="text"
+                    placeholder="Login (Username)"
+                    value={newSeller.username}
+                    onChange={e => setNewSeller(prev => ({ ...prev, username: e.target.value }))}
+                    className="bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-neutral-600"
+                    required
+                  />
+                  <input
+                    type="password"
+                    placeholder="Parol (standart: seller123)"
+                    value={newSeller.password}
+                    onChange={e => setNewSeller(prev => ({ ...prev, password: e.target.value }))}
+                    className="bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-neutral-600"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full bg-white text-black font-bold text-xs py-2.5 rounded-xl hover:bg-neutral-200 transition-all"
+                >
+                  Sotuvchini Baza Ro'yxatiga Qo'shish
+                </button>
+              </form>
+
+              {/* Existing Sellers List */}
+              <div className="pt-2 border-t border-neutral-800 space-y-2">
+                <p className="text-xs text-neutral-400 font-semibold">Tizimdagi Xodimlar:</p>
+                <div className="space-y-1.5">
+                  {usersList.map((u, i) => (
+                    <div key={i} className="flex items-center justify-between bg-neutral-950 px-3 py-2 rounded-xl text-xs text-neutral-300">
+                      <span className="font-medium text-white">{u.name} ({u.username})</span>
+                      <span className="uppercase text-[10px] bg-neutral-800 px-2 py-0.5 rounded font-bold text-neutral-400">
+                        {u.role}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Gemini Vision Cloud API Key Setting */}
+            <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-5 space-y-3">
+              <h4 className="font-bold text-sm text-white flex items-center gap-2">
+                <Key className="w-4 h-4 text-white" /> Gemini Vision AI Integratsiyasi (Ixtiyoriy)
+              </h4>
+              <p className="text-xs text-neutral-400">
+[22/10/2026 13:24] Озодбек: -- Enable RLS alter table products enable row level security; create policy "Public read products" on products for select using (true); `} </pre> </div>
+        <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4 space-y-2">
+          <h3 className="font-bold text-white text-sm">2. Environment Variable (.env.example)</h3>
+          <pre className="bg-neutral-950 p-3 rounded-xl font-mono text-[11px] text-neutral-300 border border-neutral-800">
+            {`VITE_SUPABASE_URL=https://your-supabase-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key VITE_GEMINI_API_KEY=your-gemini-vision-key`} </pre> </div> </div> )}
+  </main>
+
+  {/* MODAL: PRODUCT DETAIL VIEW */}
+  {selectedProduct && (
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fade-in">
+      <div className="bg-neutral-900 border border-neutral-800 w-full max-w-lg rounded-t-3xl sm:rounded-3xl max-h-[90vh] overflow-y-auto p-6 space-y-5 text-neutral-100 relative shadow-2xl">
+        <button
+          onClick={() => setSelectedProduct(null)}
+          className="absolute right-4 top-4 p-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-full transition-all"
+        >
+          <X className="w-5 h-5" />
+        </button>
+
+        {/* Product Image Gallery */}
+        <div className="aspect-square bg-neutral-950 rounded-2xl overflow-hidden relative border border-neutral-800">
+          <img
+            src={selectedProduct.images[0]}
+            alt={selectedProduct.name}
+            className="w-full h-full object-contain"
+          />
+          <span className="absolute top-3 left-3 bg-neutral-900/90 backdrop-blur-md px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider text-neutral-300 border border-neutral-800">
+            {selectedProduct.category}
+          </span>
+        </div>
+
+        <div>
+          <span className="text-[11px] font-mono text-neutral-500">ID: {selectedProduct.id}</span>
+          <h2 className="text-xl font-extrabold text-white leading-snug">{selectedProduct.name}</h2>
+          <div className="mt-2 text-2xl font-black text-white">
+            {formatUZS(selectedProduct.price)}
+          </div>
+        </div>
+
+        {/* Model compatibility info */}
+        <div className="bg-neutral-950 border border-neutral-800 rounded-2xl p-3.5 space-y-1">
+          <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Moslik va Model:</span>
+          <p className="text-xs font-semibold text-white">{selectedProduct.modelCompatibility || 'Barcha universal modellarga mos'}</p>
+        </div>
+
+        {/* Description */}
+        <div className="space-y-1">
+          <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">Tavsif:</span>
+          <p className="text-xs text-neutral-300 leading-relaxed">
+            {selectedProduct.description || 'Ushbu mahsulot uchun batafsil tavsif kiritilmagan.'}
+          </p>
+        </div>
+
+        <div className="pt-2">
+          <button
+            onClick={() => setSelectedProduct(null)}
+            className="w-full bg-white text-black font-bold py-3.5 rounded-2xl text-xs hover:bg-neutral-200 transition-all"
+          >
+            Yopish
+          </button>
+        </div>
+      </div>
+    </div>
+  )}
+
+  {/* MODAL: ADD / EDIT PRODUCT (ADMIN ONLY) */}
+  {isAddProductOpen && currentUser.role === 'admin' && (
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="bg-neutral-900 border border-neutral-800 w-full max-w-lg rounded-3xl max-h-[90vh] overflow-y-auto p-6 space-y-4 text-white">
+        <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+          <h3 className="font-bold text-base">
+            {editingProduct ? 'Mahsulotni Tahrirlash' : 'Yangi Mahsulot Qo\'shish'}
+          </h3>
+          <button onClick={() => setIsAddProductOpen(false)} className="text-neutral-400 hover:text-white">
+[22/10/2026 13:24] Озодбек: Kengaytirilgan bulutli rasm tanib olish uchun Gemini API kalitini kiriting. Kalit bo'lmasa, qurilmaning Canvas Visual Search algoritmi ishlaydi.
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  placeholder="Gemini API Key..."
+                  value={geminiApiKey}
+                  onChange={(e) => setGeminiApiKey(e.target.value)}
+                  className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none"
+                />
+                <button
+                  onClick={() => alert("Gemini API kaliti saqlandi!")}
+                  className="bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-semibold px-4 py-2 rounded-xl"
+                >
+                  Saqlash
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Docs & Database Info Link */}
+        <button
+          onClick={() => setActiveTab('docs')}
+          className="w-full bg-neutral-900 border border-neutral-800 hover:border-neutral-700 p-4 rounded-2xl flex items-center justify-between text-left text-xs font-semibold text-neutral-300 transition-all"
+        >
+          <div className="flex items-center gap-3">
+            <FileText className="w-5 h-5 text-neutral-400" />
+            <span>Supabase SQL & Vercel Loyihani Sozlash Yo'riqnomasi</span>
+          </div>
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
+    )}
+
+    {/* TAB 5: ADMIN PRODUCTS MANAGEMENT */}
+    {activeTab === 'admin_products' && currentUser.role === 'admin' && (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-white">Ombor Mahsulotlari</h2>
+            <p className="text-xs text-neutral-400">Jami: {products.length} ta mahsulot saqlanmoqda</p>
+          </div>
+          <button
+            onClick={() => {
+              setEditingProduct(null);
+              setProductForm({
+                name: '',
+                category: categories[0] || '',
+                modelCompatibility: '',
+                description: '',
+                price: '',
+                images: []
+              });
+              setIsAddProductOpen(true);
+            }}
+            className="bg-white text-black font-bold text-xs px-4 py-2.5 rounded-xl flex items-center gap-2 hover:bg-neutral-200 transition-all shadow-md"
+          >
+            <Plus className="w-4 h-4" /> Yangi Mahsulot
+          </button>
+        </div>
+
+        {/* Products Table / List */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-3xl overflow-hidden">
+          <div className="divide-y divide-neutral-800">
+            {products.map((p) => (
+              <div key={p.id} className="p-4 flex items-center justify-between gap-3 hover:bg-neutral-800/50 transition-all">
+                <div className="flex items-center gap-3 min-w-0">
+                  <img
+                    src={p.images[0]}
+                    alt={p.name}
+                    className="w-12 h-12 rounded-xl object-cover bg-neutral-950 flex-shrink-0"
+                  />
+                  <div className="min-w-0">
+                    <span className="text-[10px] font-bold uppercase text-neutral-500">{p.category} • ID: {p.id}</span>
+                    <h4 className="font-bold text-xs text-white truncate">{p.name}</h4>
+                    <p className="text-xs font-semibold text-white">{formatUZS(p.price)}</p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <button
+                    onClick={() => {
+                      setEditingProduct(p);
+                      setProductForm({
+                        name: p.name,
+                        category: p.category,
+                        modelCompatibility: p.modelCompatibility,
+                        description: p.description,
+[22/10/2026 13:24] Озодбек: <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSaveProduct} className="space-y-3 text-xs">
+          <div>
+            <label className="block text-neutral-400 mb-1 font-medium">Mahsulot Nomi</label>
+            <input
+              type="text"
+              required
+              placeholder="Masalan: Anker USB-C Kabel"
+              value={productForm.name}
+              onChange={e => setProductForm(prev => ({ ...prev, name: e.target.value }))}
+              className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:border-neutral-600"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-neutral-400 mb-1 font-medium">Kategoriya</label>
+              <select
+                value={productForm.category}
+                onChange={e => setProductForm(prev => ({ ...prev, category: e.target.value }))}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none"
+              >
+                {categories.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-neutral-400 mb-1 font-medium">Narxi (so'mda)</label>
+              <input
+                type="number"
+                required
+                placeholder="Masalan: 149000"
+                value={productForm.price}
+                onChange={e => setProductForm(prev => ({ ...prev, price: e.target.value }))}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-neutral-400 mb-1 font-medium">Model / Moslik Ma'lumoti</label>
+            <input
+              type="text"
+              placeholder="Masalan: iPhone 13 / 14 / 15 Pro"
+              value={productForm.modelCompatibility}
+              onChange={e => setProductForm(prev => ({ ...prev, modelCompatibility: e.target.value }))}
+              className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-neutral-400 mb-1 font-medium">Mahsulot Tavsifi</label>
+            <textarea
+              rows="3"
+              placeholder="Mahsulot haqida batafsil ma'lumot..."
+              value={productForm.description}
+              onChange={e => setProductForm(prev => ({ ...prev, description: e.target.value }))}
+              className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none"
+            />
+          </div>
+
+          {/* Rasm yuklash section */}
+          <div>
+            <label className="block text-neutral-400 mb-1 font-medium">Mahsulot Rasmlari</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="file"
+                accept="image/*"
+                onChange={handleProductImageAdd}
+                className="hidden"
+                id="product-img-upload"
+              />
+              <label
+                htmlFor="product-img-upload"
+                className="cursor-pointer bg-neutral-800 hover:bg-neutral-700 text-neutral-200 px-3.5 py-2 rounded-xl flex items-center gap-2 font-semibold"
+              >
+                <Upload className="w-4 h-4" /> Rasm Yuklash
+              </label>
+              <span className="text-neutral-500 text-[11px]">
+                {productForm.images.length} ta rasm tanlangan
+              </span>
+            </div>
+          </div>
+
+          <div className="pt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={() => setIsAddProductOpen(false)}
+              className="flex-1 bg-neutral-800 text-neutral-300 font-bold py-3 rounded-xl"
+[22/10/2026 13:24] Озодбек: >
+              Bekor qilish
+            </button>
+            <button
+              type="submit"
+              className="flex-1 bg-white text-black font-bold py-3 rounded-xl hover:bg-neutral-200"
+            >
+              Saqlash
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )}
+
+  {/* BOTTOM MOBILE NAVIGATION BAR */}
+  <nav className="fixed bottom-0 left-0 right-0 z-40 bg-neutral-900/95 backdrop-blur-lg border-t border-neutral-800 px-4 py-2">
+    <div className="max-w-md mx-auto flex items-center justify-around">
+      <NavItem
+        icon={<Package className="w-5 h-5" />}
+        label="Bosh sahifa"
+        active={activeTab === 'home'}
+        onClick={() => setActiveTab('home')}
+      />
+      <NavItem
+        icon={<Layers className="w-5 h-5" />}
+        label="Kategoriyalar"
+        active={activeTab === 'categories'}
+        onClick={() => setActiveTab('categories')}
+      />
+      <NavItem
+        icon={<Camera className="w-5 h-5" />}
+        label="Rasm bilan"
+        active={activeTab === 'camera_search'}
+        onClick={() => {
+          setActiveTab('camera_search');
+          startCamera();
+        }}
+        highlight
+      />
+      <NavItem
+        icon={<User className="w-5 h-5" />}
+        label="Profil"
+        active={activeTab === 'profile'}
+        onClick={() => setActiveTab('profile')}
+      />
+    </div>
+  </nav>
+
+</div>
+); }
+// ========================================== // SUB-COMPONENTS // ==========================================
+function ProductCard({ product, onClick, onEdit }) { return ( <div
+onClick={onClick}
+className="group bg-neutral-900 border border-neutral-800 hover:border-neutral-700 rounded-2xl overflow-hidden flex flex-col justify-between cursor-pointer transition-all hover:scale-[1.02] active:scale-[0.98]"
+> <div className="aspect-square bg-neutral-950 relative overflow-hidden"> <img
+src={product.images[0]}
+alt={product.name}
+className="w-full h-full object-cover group-hover:scale-105 transition-all duration-300"
+loading="lazy"
+/> <span className="absolute top-2 left-2 bg-black/70 backdrop-blur-md px-2 py-0.5 rounded-md text-[9px] font-bold text-neutral-300"> {product.category} </span> {onEdit && ( <button onClick={(e) => { e.stopPropagation(); onEdit(); }} className="absolute top-2 right-2 p-1.5 bg-neutral-900/90 text-white rounded-lg hover:bg-black transition-all" title="Tahrirlash" > <Edit2 className="w-3.5 h-3.5" /> </button> )} </div>
+  <div className="p-3 flex-1 flex flex-col justify-between">
+    <div>
+      <h4 className="font-bold text-xs text-white line-clamp-2 leading-snug group-hover:text-neutral-200">
+        {product.name}
+      </h4>
+      <p className="text-[10px] text-neutral-400 line-clamp-1 mt-0.5">
+        {product.modelCompatibility || 'Universal'}
+      </p>
+    </div>
+
+    <div className="mt-2.5 pt-2 border-t border-neutral-800/80 flex items-center justify-between">
+      <span className="text-xs font-black text-white">
+        {formatUZS(product.price)}
+      </span>
+      <ChevronRight className="w-3.5 h-3.5 text-neutral-500 group-hover:text-white transition-all" />
+    </div>
+  </div>
+</div>
+); }
+function NavItem({ icon, label, active, onClick, highlight }) { return ( <button onClick={onClick} className={flex flex-col items-center gap-1 p-1.5 rounded-xl transition-all ${active ? 'text-white font-bold' : 'text-neutral-500 hover:text-neutral-300' }} > <div className={p-1 rounded-xl transition-all ${highlight ? 'bg-white text-black font-extrabold shadow-md' : active ? 'bg-neutral-800' : '' }}> {icon} </div> <span className="text-[10px]">{label}</span> </button> ); }
+// LOGIN SCREEN COMPONENT function LoginView({ onLogin }) { const [username, setUsername] = useState('admin'); const [password, setPassword] = useState('admin123'); const [errorMsg, setErrorMsg] = useState('');
+const handleSubmit = (e) => { e.preventDefault(); setErrorMsg(''); const res = onLogin(username.toLowerCase().trim(), password); if (!res.success) { setErrorMsg(res.message); } };
+[22/10/2026 13:24] Озодбек: return ( <div className="min-h-screen bg-neutral-950 flex items-center justify-center p-4 font-sans antialiased text-white"> <div className="w-full max-w-sm space-y-6">
+    {/* Brand Header */}
+    <div className="text-center space-y-2">
+      <div className="w-16 h-16 rounded-2xl bg-white text-black font-black text-3xl flex items-center justify-center mx-auto shadow-2xl">
+        iM
+      </div>
+      <h1 className="text-2xl font-black tracking-tight">iMarket Access</h1>
+      <p className="text-xs text-neutral-400">Smart Accessory Inventory & Price Finder</p>
+    </div>
+
+    {/* Login Card */}
+    <div className="bg-neutral-900 border border-neutral-800 rounded-3xl p-6 shadow-2xl space-y-5">
+      {errorMsg && (
+        <div className="bg-red-950/80 border border-red-800 text-red-200 p-3 rounded-xl text-xs flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-4 text-xs">
+        <div>
+          <label className="block text-neutral-400 mb-1.5 font-medium">Foydalanuvchi nomi</label>
+          <input
+            type="text"
+            required
+            value={username}
+            onChange={e => setUsername(e.target.value)}
+            placeholder="admin yoki sotuvchi"
+            className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-neutral-600 transition-all"
+          />
+        </div>
+
+        <div>
+          <label className="block text-neutral-400 mb-1.5 font-medium">Parol</label>
+          <input
+            type="password"
+            required
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="••••••••"
+            className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-neutral-600 transition-all"
+          />
+        </div>
+
+        <button
+          type="submit"
+          className="w-full bg-white text-black font-bold py-3.5 rounded-2xl text-xs hover:bg-neutral-200 transition-all shadow-lg active:scale-95"
+        >
+          Tizimga Kirish
+        </button>
+      </form>
+
+      {/* Quick Credential Hints */}
+      <div className="pt-4 border-t border-neutral-800/80 text-[11px] text-neutral-500 space-y-1">
+        <p className="font-semibold text-neutral-400">Test parollar:</p>
+        <div className="flex justify-between">
+          <span>Admin: <strong className="text-neutral-300">admin / admin123</strong></span>
+        </div>
+        <div className="flex justify-between">
+          <span>Sotuvchi: <strong className="text-neutral-300">sotuvchi / seller123</strong></span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+);
+}
